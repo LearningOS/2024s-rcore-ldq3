@@ -19,7 +19,6 @@ use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use lazy_static::*;
 use switch::__switch;
-use alloc::collections::BTreeMap;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
@@ -69,12 +68,6 @@ lazy_static! {
                 })
             },
         }
-    };
-    /// The times of every syscall called by task
-    static ref SYSCALL_TIMES: [BTreeMap<usize, u32>; MAX_APP_NUM] = {
-        const ARRAY_REPEAT_VALUE: BTreeMap<usize, u32> = BTreeMap::new();
-        let syscall_times = [ARRAY_REPEAT_VALUE; MAX_APP_NUM];
-        syscall_times
     };
 }
 
