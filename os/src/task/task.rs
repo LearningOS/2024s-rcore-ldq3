@@ -10,8 +10,10 @@ pub struct TaskControlBlock {
     pub task_status: TaskStatus,
     /// The task context
     pub task_cx: TaskContext,
-    /// /// The times of syscall called by task
-    pub syscall_times: BTreeMap<usize, u32>
+    /// The times of every syscall called by the task
+    pub syscall_times: BTreeMap<usize, u32>,
+    /// The start time of the task
+    pub start_time: usize
 }
 
 /// The status of a task

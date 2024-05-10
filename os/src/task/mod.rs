@@ -56,7 +56,8 @@ lazy_static! {
             core::array::from_fn(|_|{TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
-            syscall_times: BTreeMap::new()
+            syscall_times: BTreeMap::new(),
+            start_time: 0
         }});
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -83,6 +84,9 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+        if task0.start_time != 0 {
+            task0.start_time = crate::timer::get_time_ms();
+        }
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -125,6 +129,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].start_time != 0 {
+                inner.tasks[next].start_time = crate::timer::get_time_ms();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -139,7 +146,7 @@ impl TaskManager {
         }
     }
 
-    /// Get syscall times, cloned.
+    /// Get syscall times
     pub fn get_syscall_times(&self, map: &mut [u32; crate::config::MAX_SYSCALL_NUM]) {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
@@ -154,6 +161,13 @@ impl TaskManager {
         let current = inner.current_task;
         let times = &mut inner.tasks[current].syscall_times;
         *times.entry(syscall_id).or_default() += 1;
+    }
+
+    /// Get start time of the task.
+    pub fn get_start_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].start_time
     }
 }
 
@@ -188,4 +202,9 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Get start time of the task.
+pub fn get_start_time() -> usize {
+    TASK_MANAGER.get_start_time()
 }
