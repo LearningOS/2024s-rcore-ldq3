@@ -6,7 +6,7 @@ use core::fmt::{Debug, Formatter, Result};
 /// Magic number for sanity check
 const EFS_MAGIC: u32 = 0x3b800001;
 /// The max number of direct inodes
-const INODE_DIRECT_COUNT: usize = 28;
+const INODE_DIRECT_COUNT: usize = 27;
 /// The max length of inode name
 const NAME_LENGTH_LIMIT: usize = 27;
 /// The max number of indirect1 inodes
@@ -70,7 +70,9 @@ impl SuperBlock {
 /// Type of a disk inode
 #[derive(PartialEq)]
 pub enum DiskInodeType {
+    /// File
     File,
+    /// Directory
     Directory,
 }
 
@@ -81,10 +83,17 @@ type DataBlock = [u8; BLOCK_SZ];
 /// A disk inode
 #[repr(C)]
 pub struct DiskInode {
+    /// nlink of the file
+    pub nlink: u32,
+    /// Size of the file
     pub size: u32,
+    /// Direct inodes
     pub direct: [u32; INODE_DIRECT_COUNT],
+    /// Indirect1 inode
     pub indirect1: u32,
+    /// Indirect2 inode
     pub indirect2: u32,
+    /// Type of the file
     type_: DiskInodeType,
 }
 
@@ -92,6 +101,7 @@ impl DiskInode {
     /// Initialize a disk inode, as well as all direct inodes under it
     /// indirect1 and indirect2 block are allocated only when they are needed
     pub fn initialize(&mut self, type_: DiskInodeType) {
+        self.nlink=1;
         self.size = 0;
         self.direct.iter_mut().for_each(|v| *v = 0);
         self.indirect1 = 0;

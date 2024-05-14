@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
+    inode_id:usize,
     block_id: usize,
     block_offset: usize,
     fs: Arc<Mutex<EasyFileSystem>>,
@@ -17,12 +18,14 @@ pub struct Inode {
 impl Inode {
     /// Create a vfs inode
     pub fn new(
+        inode_id:u32,
         block_id: u32,
         block_offset: usize,
         fs: Arc<Mutex<EasyFileSystem>>,
         block_device: Arc<dyn BlockDevice>,
     ) -> Self {
         Self {
+            inode_id:inode_id as usize,
             block_id: block_id as usize,
             block_offset,
             fs,
@@ -30,13 +33,13 @@ impl Inode {
         }
     }
     /// Call a function over a disk inode to read it
-    fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
+    pub fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
         get_block_cache(self.block_id, Arc::clone(&self.block_device))
             .lock()
             .read(self.block_offset, f)
     }
     /// Call a function over a disk inode to modify it
-    fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
+    pub fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
         get_block_cache(self.block_id, Arc::clone(&self.block_device))
             .lock()
             .modify(self.block_offset, f)
@@ -65,6 +68,7 @@ impl Inode {
             self.find_inode_id(name, disk_inode).map(|inode_id| {
                 let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
                 Arc::new(Self::new(
+                    inode_id,
                     block_id,
                     block_offset,
                     self.fs.clone(),
@@ -74,7 +78,7 @@ impl Inode {
         })
     }
     /// Increase the size of a disk inode
-    fn increase_size(
+    pub fn increase_size(
         &self,
         new_size: u32,
         disk_inode: &mut DiskInode,
@@ -131,6 +135,7 @@ impl Inode {
         block_cache_sync_all();
         // return inode
         Some(Arc::new(Self::new(
+            new_inode_id,
             block_id,
             block_offset,
             self.fs.clone(),
@@ -182,5 +187,57 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+    /// get the diskinode type
+    pub fn get_type(&self) -> DiskInodeType {
+        let _fs = self.fs.lock();
+        self.read_disk_inode(|disk_inode| 
+            if disk_inode.is_dir(){
+                DiskInodeType::Directory
+            } else {
+                DiskInodeType::File
+            })
+    }
+    /// get the inode id
+    pub fn get_inode_id(&self) -> u32 {
+        self.inode_id as u32
+    }
+    /// get the fs
+    pub fn get_fs(&self) -> Arc<Mutex<EasyFileSystem>> {
+        self.fs.clone()
+    }
+    /// get the block device
+    pub fn get_block_device(&self) -> Arc<dyn BlockDevice> {
+        self.block_device.clone()
+    }
+    /// delete a dirent by name
+    pub fn delete_dirent(&self,name: &str)->i64{
+        self.modify_disk_inode(|disk_inode| {
+            // assert it is a directory
+            assert!(disk_inode.is_dir());
+            let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            for i in 0..file_count {
+                assert_eq!(
+                    disk_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device),
+                    DIRENT_SZ,
+                );
+                if dirent.name() == name {
+                    // no need to move the dirent table
+                    // delete the dirent
+                    let mut next_dirent = DirEntry::empty();
+                    for j in i+1..file_count {
+                        assert_eq!(
+                            disk_inode.read_at(DIRENT_SZ * j, next_dirent.as_bytes_mut(), &self.block_device),
+                            DIRENT_SZ,
+                        );
+                        disk_inode.write_at(DIRENT_SZ * (j-1), next_dirent.as_bytes(), &self.block_device);
+                    }
+                    disk_inode.size= ((file_count-1) * DIRENT_SZ) as u32;
+                    return 0;
+                }
+            }
+            return -1;
+        })
     }
 }

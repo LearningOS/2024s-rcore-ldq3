@@ -5,12 +5,13 @@ use alloc::sync::Arc;
 use crate::{
     config::MAX_SYSCALL_NUM,
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+    mm::{translated_byte_buffer, translated_refmut, translated_str, MapPermission, PageTable, VirtAddr, VirtPageNum},
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next, TaskStatus,
+        add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, TaskControlBlock, TaskStatus
     },
 };
+
+use crate::timer::get_time_us;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -31,13 +32,12 @@ pub struct TaskInfo {
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    trace!("kernel:pid[{}] sys_exit", current_task().unwrap().pid.0);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
 
 pub fn sys_yield() -> isize {
-    //trace!("kernel: sys_yield");
+    trace!("kernel: sys_yield");
     suspend_current_and_run_next();
     0
 }
@@ -76,13 +76,13 @@ pub fn sys_exec(path: *const u8) -> isize {
     }
 }
 
+// #[no_mangle]
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
+/// pid=-1 means waiting for any child process.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     //trace!("kernel: sys_waitpid");
     let task = current_task().unwrap();
-    // find a child process
-
     // ---- access current PCB exclusively
     let mut inner = task.inner_exclusive_access();
     if !inner
@@ -94,7 +94,7 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         // ---- release current PCB
     }
     let pair = inner.children.iter().enumerate().find(|(_, p)| {
-        // ++++ temporarily access child PCB exclusively
+        // ++++ temporarily access child PCB exclusively（暂时获取子进程TCB的使用权）
         p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as usize == p.getpid())
         // ++++ release child PCB
     });
@@ -114,44 +114,141 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     // ---- release current PCB automatically
 }
 
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
+
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    // _ts is a virtual address
+    trace!("kernel: sys_get_time");
+    let us = get_time_us();     //get the time in us
+    let mut time=TimeVal{
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    let time_raw_ptr=&mut time as *const TimeVal as *const u8;
+    let time_slice: &[u8];
+    unsafe{
+        time_slice =core::slice::from_raw_parts(time_raw_ptr,core::mem::size_of::<TimeVal>());
+    }
+    //get the current task control block(这个函数返回的是一个Arc指针的clone，后面还是直接手动drop掉)
+    let tcb_ptr:Arc::<TaskControlBlock> =current_task().unwrap();
+    let inner= (*tcb_ptr).inner_exclusive_access();
+    let buffers = translated_byte_buffer(inner.get_user_token(),_ts as *const u8,core::mem::size_of::<TimeVal>());  //get the translated byte buffer
+    drop(inner);
+    // drop(tcb_ptr);
+    let mut start=0;
+    // write the time to the buffer(phiysical memory)
+    for buffer in buffers {
+        if start+buffer.len()>=time_slice.len(){
+            buffer.copy_from_slice(&time_slice[start..]);
+        }else{
+            buffer.copy_from_slice(&time_slice[start..start+buffer.len()]);
+        }
+        start+=buffer.len();
+    }
+    0
 }
 
-/// YOUR JOB: Finish sys_task_info to pass testcases
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TaskInfo`] is splitted by two pages ?
 pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_task_info NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    //get the current task control block(这个函数返回的是一个Arc指针的clone，后面还是直接手动drop掉)
+    let tcb_ptr:Arc::<TaskControlBlock> =current_task().unwrap();
+    // inner borrow the task control block
+    let inner= (*tcb_ptr).inner_exclusive_access();
+    let buffers = translated_byte_buffer(inner.get_user_token(),_ti as *const u8,core::mem::size_of::<TimeVal>());  //get the translated byte buffer
+    let us = get_time_us();     //get the time in us
+    let mut temp_info=TaskInfo{
+        status:TaskStatus::Running,
+        syscall_times:inner.syscall_times.clone(),
+        time:(us-inner.sche_time.unwrap())/1000,
+    };
+    // get the raw pointer of TaskInfo
+    let info_raw_ptr=&mut temp_info as *const TaskInfo as *const u8;
+    let info_slice: &[u8];
+    // get the slice of TaskInfo
+    unsafe{
+        info_slice =core::slice::from_raw_parts(info_raw_ptr,core::mem::size_of::<TaskInfo>());
+    }
+    drop(inner);
+    // drop(tcb_ptr);
+
+    let mut start=0;
+    // write the time to the buffer(phiysical memory)
+    for buffer in buffers {
+        if start+buffer.len()>=info_slice.len(){
+            buffer.copy_from_slice(&info_slice[start..]);
+        }else{
+            buffer.copy_from_slice(&info_slice[start..start+buffer.len()]);
+        }
+        start+=buffer.len();
+    }
+    0
 }
 
-/// YOUR JOB: Implement mmap.
+#[no_mangle]
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    if (_start%4096)!=0{                //start address is not page align
+        println!("start address is not page align");
+        return -1;
+    }
+    //assert the port is valid
+    if _port&(!0x7)!=0||_port&0x7==0{
+        println!("the port is not valid");
+        return -1;
+    }
+
+    let vpn =VirtPageNum::from(_start>>12); //vpn is the virtual page number(page align)
+    
+    let page_num =(_len+4095)/4096;      //page_num is the number of pages
+    
+    //get the current task control block
+    let tcb_ptr:Arc::<TaskControlBlock> =current_task().unwrap();
+    let mut inner= (*tcb_ptr).inner_exclusive_access();
+    let page_table=PageTable::from_token(inner.get_user_token());  //get the page table
+
+    //check the page_entry is valid or not
+    for i in 0..page_num{
+        match page_table.translate(VirtPageNum::from(usize::from(vpn)+i)){
+            Some(pte) if pte.is_valid()=>{
+                return -1;
+            }
+            _=>{continue;}
+        }
+    }
+    //create a new map
+    let mut flags =MapPermission::from_bits((_port<<1) as u8).unwrap();  //shift the port to the left by 1(为了对上页表项的标志位)
+    flags=flags | MapPermission::U;     // add the user flag
+    inner.memory_set.insert_framed_area(VirtAddr::from(_start),VirtAddr::from(_start+_len),flags);  //insert the new map area
+    inner.memory_set.append_to(VirtAddr::from(_start),VirtAddr::from(_start+_len));    //init the new map area
+    drop(inner);
+    // drop(tcb_ptr);
+    return 0;
 }
 
-/// YOUR JOB: Implement munmap.
+#[no_mangle]
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    
+    if (_start%4096)!=0{                //start address is not page align
+        println!("start address is not page align");
+        return -1;
+    }
+
+    let vpn =VirtPageNum::from(_start>>12); //vpn is the virtual page number(page align)
+
+    let page_num =(_len+4095)/4096;      //page_num is the number of pages
+    let tcb_ptr:Arc::<TaskControlBlock> =current_task().unwrap();
+    let mut inner= (*tcb_ptr).inner_exclusive_access();
+    let page_table=PageTable::from_token(inner.get_user_token());  //get the page table
+    //check the pageentry is valid or not
+    for i in 0..page_num{
+        match page_table.translate(VirtPageNum::from(usize::from(vpn)+i)){
+            Some(pte) if pte.is_valid()=>{continue;}
+            _=>{
+                return -1;
+            }
+        }
+    }
+    // remove the map area
+    inner.memory_set.shrink_to(VirtAddr::from(_start),VirtAddr::from(_start)); //ummap the map area
+    drop(inner);
+    return 0;
 }
 
 /// change data segment size
@@ -164,21 +261,48 @@ pub fn sys_sbrk(size: i32) -> isize {
     }
 }
 
-/// YOUR JOB: Implement spawn.
-/// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    // get the path of the new app
+    let path = translated_str(current_user_token(), _path);
+    if let Some(inode) = open_file(&path, OpenFlags::RDONLY) {
+        let v: alloc::vec::Vec<u8> = inode.read_all();
+        // get the app data(create a new task control block)
+        let tcb=Arc::new(TaskControlBlock::new(v.as_slice()));
+        let pid = tcb.getpid();
+        // get the task control block of the current task(当前任务一定存在，不然不会有进程调用spawn)
+        let current_tcb=current_task().unwrap();
+        let mut inner =current_tcb.inner_exclusive_access();
+        // add the new task to the children list of the current task
+        inner.children.push(tcb.clone());
+        drop(inner);
+        let mut inner = tcb.inner_exclusive_access();
+        inner.parent=Some(Arc::downgrade(&current_tcb));
+        drop(inner);
+        // for child in inner.children.iter() {
+        //     println!("spwan====parent pid :{},child pid:{}",current_tcb.getpid(),child.getpid());
+        // }
+        // drop(current_tcb);
+        // and add it to the task list（此时会发生所有权的转移，所以需要在之前就取出当前进程的pid）
+        // println!("spwan====pid is {}, Num is {}",tcb.getpid(),Arc::strong_count(&tcb));
+        add_task(tcb);
+        pid as isize
+    }else{
+        -1
+    }
 }
 
-// YOUR JOB: Set task priority.
 pub fn sys_set_priority(_prio: isize) -> isize {
     trace!(
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _prio>=2{
+        _prio
+    }else{
+        -1
+    }
 }

@@ -48,7 +48,6 @@ pub mod timer;
 pub mod trap;
 
 use core::arch::global_asm;
-
 global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
 fn clear_bss() {

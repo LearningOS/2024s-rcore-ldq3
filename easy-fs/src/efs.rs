@@ -5,6 +5,7 @@ use super::{
 use crate::BLOCK_SZ;
 use alloc::sync::Arc;
 use spin::Mutex;
+use core::ptr;
 ///An easy file system on block
 pub struct EasyFileSystem {
     ///Real device
@@ -109,7 +110,7 @@ impl EasyFileSystem {
         // acquire efs lock temporarily
         let (block_id, block_offset) = efs.lock().get_disk_inode_pos(0);
         // release efs lock
-        Inode::new(block_id, block_offset, Arc::clone(efs), block_device)
+        Inode::new(0,block_id, block_offset, Arc::clone(efs), block_device)
     }
     /// Get inode by id
     pub fn get_disk_inode_pos(&self, inode_id: u32) -> (u32, usize) {
@@ -147,5 +148,19 @@ impl EasyFileSystem {
             &self.block_device,
             (block_id - self.data_area_start_block) as usize,
         )
+    }
+    /// Deallocate a inode
+    pub fn dealloc_inode(&mut self, inode_id: u32) {
+        // get the disk block id and offset to clear the DiskNode
+        let (block_id,block_offset) = self.get_disk_inode_pos(inode_id);
+        get_block_cache(block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(block_offset, |disk_inode: &mut DiskInode| {
+                unsafe{
+                    ptr::write_bytes(disk_inode as *mut _ as *mut u8, 0, core::mem::size_of::<DiskInode>());
+                }
+            });
+        // clear the bitmap
+        self.inode_bitmap.dealloc(&self.block_device, inode_id as usize);
     }
 }
